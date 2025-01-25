@@ -7,11 +7,18 @@ weight: 10
 
 Global config is some CLI flags that can be set in every command.
 
+{{< hint info >}}
+**Set Global Config EVERYTIME!**
+
+Global config **does not mean** that the configuration will be persisted or only need to be set once in global settings, they will only take effect in the current command.
+You need to set them in each command.
+{{< /hint >}}
+
 ## `-n/--ns`
 
-Each namespace represents a Telegram account.
+Each namespace represents a Telegram account. Default: `default`.
 
-You should set the namespace **when each command is executed**:
+If you want to add another account, just add `-n YOUR_ACCOUNT_NAME` option to every command:
 
 {{< command >}}
 tdl -n iyear
@@ -19,12 +26,33 @@ tdl -n iyear
 
 ## `--proxy`
 
-Set the proxy. Only support `socks5` now. Default: `""`.
+Set the proxy. Default: `""`.
 
 Format: `protocol://username:password@host:port`
 
 {{< command >}}
 tdl --proxy socks5://localhost:1080
+tdl --proxy http://localhost:8080
+tdl --proxy https://localhost:8081
+{{< /command >}}
+
+## `--storage`
+
+Set the storage. Default: `type=bolt,path=~/.tdl/data`
+
+Format: `type=DRIVER,opt1=val1,opt2=val2,...`
+
+Available drivers:
+
+|      Driver      |            Options             | Description                                                                                                   |
+|:----------------:|:------------------------------:|---------------------------------------------------------------------------------------------------------------|
+| `bolt` (Default) | `path=/path/to/data-directory` | Store data in separate database files. So you can use it in multiple processes(must be different namespaces). |
+|      `file`      |   `path=/path/to/data.json`    | Store data in a single JSON file, which is useful for debugging.                                              |
+|     `legacy`     |    `path=/path/to/data.kv`     | **Deprecated.** Store data in a single database file. So you **can't** use it in multiple processes.          |
+|        -         |               -                | Wait for more drivers...                                                                                      |
+
+{{< command >}}
+tdl --storage type=bolt,path=/path/to/data-dir
 {{< /command >}}
 
 ## `--ntp`
@@ -57,12 +85,24 @@ tdl --debug
 
 ## `--pool`
 
-Set the DC pool size of Telegram client. Default: `3`.
+Set the DC pool size of Telegram client. Default: `8`.
 
-{{< hint warning >}}
-DO NOT set it too large, or tdl may be forced to quit by Telegram.
+{{< hint info >}}
+Set higher timeout or 0(INF) if you want faster speed.
 {{< /hint >}}
 
 {{< command >}}
 tdl --pool 2
+{{< /command >}}
+
+## `--delay`
+
+set the delay between each task. Default: `0s`.
+
+{{< hint info >}}
+Set higher delay time if you want to avoid Telegram's flood control.
+{{< /hint >}}
+
+{{< command >}}
+tdl --delay 5s
 {{< /command >}}

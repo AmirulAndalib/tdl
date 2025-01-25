@@ -17,14 +17,7 @@ tdl up -p /path/to/file -p /path/to/dir
 
 上传到自定义聊天。
 
-{{< details title="CHAT 示例" open=false >}}
-
-- `@iyear`
-- `iyear`
-- `123456789`（ID）
-- `https://t.me/iyear`
-- `+1 123456789`（电话）
-  {{< /details >}}
+{{< include "snippets/chat.md" >}}
 
 {{< command >}}
 tdl up -p /path/to/file -c CHAT
@@ -32,10 +25,10 @@ tdl up -p /path/to/file -c CHAT
 
 ## 自定义参数
 
-使用每个任务8个线程、512KiB（最大）分块大小、4个并发任务上传：
+使用每个任务8个线程、4个并发任务上传：
 
 {{< command >}}
-tdl up -p /path/to/file -t 8 -s 524288 -l 4
+tdl up -p /path/to/file -t 8 -l 4
 {{< /command >}}
 
 ## 过滤器

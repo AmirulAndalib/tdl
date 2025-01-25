@@ -17,24 +17,20 @@ import (
 	"github.com/gotd/contrib/partio"
 	"github.com/gotd/contrib/tg_io"
 	"github.com/gotd/td/telegram/peers"
-	"github.com/gotd/td/telegram/query"
-	"github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/tg"
 	"github.com/spf13/viper"
 
-	"github.com/iyear/tdl/app/internal/dliter"
+	"github.com/iyear/tdl/core/dcpool"
+	"github.com/iyear/tdl/core/logctx"
+	"github.com/iyear/tdl/core/storage"
+	"github.com/iyear/tdl/core/tmedia"
+	"github.com/iyear/tdl/core/util/tutil"
 	"github.com/iyear/tdl/pkg/consts"
-	"github.com/iyear/tdl/pkg/dcpool"
-	"github.com/iyear/tdl/pkg/downloader"
-	"github.com/iyear/tdl/pkg/kv"
-	"github.com/iyear/tdl/pkg/logger"
-	"github.com/iyear/tdl/pkg/storage"
-	"github.com/iyear/tdl/pkg/tmedia"
-	"github.com/iyear/tdl/pkg/utils"
+	"github.com/iyear/tdl/pkg/tmessage"
 )
 
 type media struct {
-	*downloader.Item
+	*tmedia.Media
 	MIME string
 }
 
@@ -42,9 +38,9 @@ type media struct {
 var tmpl string
 
 func serve(ctx context.Context,
-	kvd kv.KV,
+	kvd storage.Storage,
 	pool dcpool.Pool,
-	dialogs [][]*dliter.Dialog,
+	dialogs [][]*tmessage.Dialog,
 	port int,
 	takeout bool,
 ) error {
@@ -67,23 +63,17 @@ func serve(ctx context.Context,
 				return errors.Wrap(err, "invalid message id")
 			}
 
-			p, err := utils.Telegram.GetInputPeer(ctx, manager, peer)
+			p, err := tutil.GetInputPeer(ctx, manager, peer)
 			if err != nil {
 				return errors.Wrap(err, "resolve peer")
 			}
 
-			iter := query.Messages(pool.Default(ctx)).
-				GetHistory(p.InputPeer()).OffsetID(message + 1).
-				BatchSize(1).Iter()
-			if !iter.Next(ctx) {
-				return errors.New("no messages")
+			msg, err := tutil.GetSingleMessage(ctx, pool.Default(ctx), p.InputPeer(), message)
+			if err != nil {
+				return errors.Wrap(err, "resolve message")
 			}
 
-			if iter.Value().Msg.GetID() != message {
-				return fmt.Errorf("the message %d/%d may be deleted", p.ID(), message)
-			}
-
-			item, err = convItem(iter.Value())
+			item, err = convItem(msg)
 			if err != nil {
 				return errors.Wrap(err, "convItem")
 			}
@@ -104,7 +94,7 @@ func serve(ctx context.Context,
 
 		http_io.NewHandler(u, item.Size).
 			WithContentType(item.MIME).
-			WithLog(logger.From(ctx).Named("serve")).
+			WithLog(logctx.From(ctx).Named("serve")).
 			ServeHTTP(w, r)
 		return nil
 	}))
@@ -113,7 +103,7 @@ func serve(ctx context.Context,
 	for _, dialog := range dialogs {
 		for _, d := range dialog {
 			for _, m := range d.Messages {
-				items = append(items, fmt.Sprintf("%d/%d", utils.Telegram.GetInputPeerID(d.Peer), m))
+				items = append(items, fmt.Sprintf("%d/%d", tutil.GetInputPeerID(d.Peer), m))
 			}
 		}
 	}
@@ -152,24 +142,26 @@ func handler(h func(w http.ResponseWriter, r *http.Request) error) http.Handler 
 	})
 }
 
-func convItem(elem messages.Elem) (*media, error) {
-	msg, ok := elem.Msg.(*tg.Message)
-	if !ok {
-		return nil, errors.New("value is not a message")
-	}
-
-	item, ok := tmedia.GetMedia(msg)
+func convItem(msg *tg.Message) (*media, error) {
+	md, ok := tmedia.GetMedia(msg)
 	if !ok {
 		return nil, errors.New("message is not a media")
 	}
 
-	file, ok := elem.File()
-	if !ok {
-		return nil, errors.New("message has no file")
+	mime := ""
+	switch m := msg.Media.(type) {
+	case *tg.MessageMediaDocument:
+		doc, ok := m.Document.AsNotEmpty()
+		if !ok {
+			return nil, errors.New("document is empty")
+		}
+		mime = doc.MimeType
+	case *tg.MessageMediaPhoto:
+		mime = "image/jpeg"
 	}
 
 	return &media{
-		Item: item,
-		MIME: file.MIMEType,
+		Media: md,
+		MIME:  mime,
 	}, nil
 }

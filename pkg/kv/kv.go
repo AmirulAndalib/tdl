@@ -1,74 +1,71 @@
 package kv
 
 import (
-	"errors"
-	"os"
-	"time"
+	"context"
+	"io"
 
-	"go.etcd.io/bbolt"
-	"go.uber.org/multierr"
+	"github.com/go-faster/errors"
 
-	"github.com/iyear/tdl/pkg/validator"
+	"github.com/iyear/tdl/core/storage"
 )
 
-var ErrNotFound = errors.New("key not found")
+//go:generate go-enum --values --names --flag --nocase
 
-type KV interface {
-	Get(key string) ([]byte, error)
-	Set(key string, value []byte) error
-	Delete(key string) error
+// Driver
+// ENUM(legacy, bolt, file)
+type Driver string
+
+const DriverTypeKey = "type"
+
+type Meta map[string]map[string][]byte // namespace, key, value
+
+type Storage interface {
+	Name() string
+	MigrateTo() (Meta, error)
+	MigrateFrom(Meta) error
+	Namespaces() ([]string, error)
+	Open(ns string) (storage.Storage, error)
+	io.Closer
 }
 
-type Options struct {
-	NS   string `validate:"required"`
-	Path string `validate:"required"`
+var drivers = map[Driver]func(map[string]any) (Storage, error){}
+
+func register(name Driver, fn func(map[string]any) (Storage, error)) {
+	drivers[name] = fn
 }
 
-func New(opts Options) (KV, error) {
-	if err := validator.Struct(&opts); err != nil {
-		return nil, err
+func New(driver Driver, opts map[string]any) (Storage, error) {
+	if fn, ok := drivers[driver]; ok {
+		return fn(opts)
 	}
 
-	db, err := bbolt.Open(opts.Path, os.ModePerm, &bbolt.Options{
-		Timeout:      time.Second,
-		NoGrowSync:   false,
-		FreelistType: bbolt.FreelistArrayType,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if err = db.Update(func(tx *bbolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists([]byte(opts.NS))
-		return err
-	}); err != nil {
-		return nil, err
-	}
-
-	return &Bolt{db: db, ns: []byte(opts.NS)}, nil
+	return nil, errors.Errorf("unsupported driver: %s", driver)
 }
 
-// Namespaces returns all namespaces in the database
-func Namespaces(path string) (_ []string, rerr error) {
-	db, err := bbolt.Open(path, os.ModePerm, &bbolt.Options{
-		Timeout:  time.Second,
-		ReadOnly: true,
-	})
+func NewWithMap(o map[string]string) (Storage, error) {
+	driver, err := ParseDriver(o[DriverTypeKey])
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "parse driver")
 	}
-	defer multierr.AppendInvoke(&rerr, multierr.Close(db))
 
-	namespaces := make([]string, 0)
-	err = db.View(func(tx *bbolt.Tx) error {
-		return tx.ForEach(func(name []byte, _ *bbolt.Bucket) error {
-			namespaces = append(namespaces, string(name))
-			return nil
-		})
-	})
+	opts := make(map[string]any)
+	for k, v := range o {
+		if k == DriverTypeKey {
+			continue
+		}
 
-	if err != nil {
-		return nil, err
+		opts[k] = v
 	}
-	return namespaces, nil
+
+	return New(driver, opts)
+}
+
+type ctxKey struct{}
+
+func With(ctx context.Context, kv Storage) context.Context {
+	return context.WithValue(ctx, ctxKey{}, kv)
+}
+
+func From(ctx context.Context) Storage {
+	return ctx.Value(ctxKey{}).(Storage)
 }
