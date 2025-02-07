@@ -3,8 +3,7 @@ package texpr
 import (
 	"sync"
 
-	"github.com/antonmedv/expr"
-	"github.com/antonmedv/expr/vm"
+	"github.com/expr-lang/expr/vm"
 )
 
 var vmPool = sync.Pool{New: func() any {
@@ -18,8 +17,4 @@ func Run(program *vm.Program, env any) (any, error) {
 	defer vmPool.Put(v)
 
 	return v.Run(program, env)
-}
-
-func Compile(input string) (*vm.Program, error) {
-	return expr.Compile(input, expr.AsBool())
 }

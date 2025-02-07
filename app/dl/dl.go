@@ -3,24 +3,27 @@ package dl
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/fatih/color"
-	"github.com/gotd/contrib/middleware/floodwait"
+	"github.com/go-faster/errors"
+	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/peers"
 	"github.com/spf13/viper"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
 
-	"github.com/iyear/tdl/app/internal/dliter"
-	"github.com/iyear/tdl/app/internal/tgc"
+	"github.com/iyear/tdl/core/dcpool"
+	"github.com/iyear/tdl/core/downloader"
+	"github.com/iyear/tdl/core/logctx"
+	"github.com/iyear/tdl/core/storage"
+	"github.com/iyear/tdl/core/tclient"
 	"github.com/iyear/tdl/pkg/consts"
-	"github.com/iyear/tdl/pkg/dcpool"
-	"github.com/iyear/tdl/pkg/downloader"
 	"github.com/iyear/tdl/pkg/key"
-	"github.com/iyear/tdl/pkg/kv"
-	"github.com/iyear/tdl/pkg/logger"
+	"github.com/iyear/tdl/pkg/prog"
+	"github.com/iyear/tdl/pkg/tmessage"
+	"github.com/iyear/tdl/pkg/utils"
 )
 
 type Options struct {
@@ -34,6 +37,7 @@ type Options struct {
 	Exclude    []string
 	Desc       bool
 	Takeout    bool
+	Group      bool // auto detect grouped message
 
 	// resume opts
 	Continue, Restart bool
@@ -45,92 +49,85 @@ type Options struct {
 
 type parser struct {
 	Data   []string
-	Parser func(ctx context.Context, pool dcpool.Pool, kvd kv.KV, data []string) ([]*dliter.Dialog, error)
+	Parser tmessage.ParseSource
 }
 
-func Run(ctx context.Context, opts *Options) error {
-	c, kvd, err := tgc.NoLogin(ctx)
+func Run(ctx context.Context, c *telegram.Client, kvd storage.Storage, opts Options) (rerr error) {
+	pool := dcpool.NewPool(c,
+		int64(viper.GetInt(consts.FlagPoolSize)),
+		tclient.NewDefaultMiddlewares(ctx, viper.GetDuration(consts.FlagReconnectTimeout))...)
+	defer multierr.AppendInvoke(&rerr, multierr.Close(pool))
+
+	parsers := []parser{
+		{Data: opts.URLs, Parser: tmessage.FromURL(ctx, pool, kvd, opts.URLs)},
+		{Data: opts.Files, Parser: tmessage.FromFile(ctx, pool, kvd, opts.Files, true)},
+	}
+	dialogs, err := collectDialogs(parsers)
+	if err != nil {
+		return err
+	}
+	logctx.From(ctx).Debug("Collect dialogs",
+		zap.Any("dialogs", dialogs))
+
+	if opts.Serve {
+		return serve(ctx, kvd, pool, dialogs, opts.Port, opts.Takeout)
+	}
+
+	manager := peers.Options{Storage: storage.NewPeers(kvd)}.Build(pool.Default(ctx))
+
+	it, err := newIter(pool, manager, dialogs, opts, viper.GetDuration(consts.FlagDelay))
 	if err != nil {
 		return err
 	}
 
-	return tgc.RunWithAuth(ctx, c, func(ctx context.Context) (rerr error) {
-		pool := dcpool.NewPool(c, int64(viper.GetInt(consts.FlagPoolSize)), floodwait.NewSimpleWaiter())
-		defer multierr.AppendInvoke(&rerr, multierr.Close(pool))
-
-		parsers := []parser{
-			{Data: opts.URLs, Parser: parseURLs},
-			{Data: opts.Files, Parser: parseFiles},
-		}
-		dialogs, err := collectDialogs(ctx, pool, kvd, parsers)
-		if err != nil {
+	if !opts.Restart {
+		// resume download and ask user to continue
+		if err = resume(ctx, kvd, it, !opts.Continue); err != nil {
 			return err
 		}
-		logger.From(ctx).Debug("Collect dialogs",
-			zap.Any("dialogs", dialogs))
+	} else {
+		color.Yellow("Restart download by 'restart' flag")
+	}
 
-		if opts.Serve {
-			return serve(ctx, kvd, pool, dialogs, opts.Port, opts.Takeout)
+	defer func() { // save progress
+		if rerr != nil { // download is interrupted
+			multierr.AppendInto(&rerr, saveProgress(ctx, kvd, it))
+		} else { // if finished, we should clear resume key
+			multierr.AppendInto(&rerr, kvd.Delete(ctx, key.Resume(it.Fingerprint())))
 		}
+	}()
 
-		iter, err := dliter.New(ctx, &dliter.Options{
-			Pool:     pool,
-			KV:       kvd,
-			Template: opts.Template,
-			Include:  opts.Include,
-			Exclude:  opts.Exclude,
-			Desc:     opts.Desc,
-			Dialogs:  dialogs,
-		})
-		if err != nil {
-			return err
-		}
+	dlProgress := prog.New(utils.Byte.FormatBinaryBytes)
+	dlProgress.SetNumTrackersExpected(it.Total())
+	prog.EnablePS(ctx, dlProgress)
 
-		if !opts.Restart {
-			// resume download and ask user to continue
-			if err = resume(ctx, kvd, iter, !opts.Continue); err != nil {
-				return err
-			}
-		} else {
-			color.Yellow("Restart download by 'restart' flag")
-		}
+	options := downloader.Options{
+		Pool:     pool,
+		Threads:  viper.GetInt(consts.FlagThreads),
+		Iter:     it,
+		Progress: newProgress(dlProgress, it, opts),
+	}
+	limit := viper.GetInt(consts.FlagLimit)
 
-		defer func() { // save progress
-			if rerr != nil { // download is interrupted
-				multierr.AppendInto(&rerr, saveProgress(ctx, kvd, iter))
-			} else { // if finished, we should clear resume key
-				multierr.AppendInto(&rerr, kvd.Delete(key.Resume(iter.Fingerprint())))
-			}
-		}()
+	logctx.From(ctx).Info("Start download",
+		zap.String("dir", opts.Dir),
+		zap.Bool("rewrite_ext", opts.RewriteExt),
+		zap.Bool("skip_same", opts.SkipSame),
+		zap.Int("threads", options.Threads),
+		zap.Int("limit", limit))
 
-		options := downloader.Options{
-			Pool:       pool,
-			Dir:        opts.Dir,
-			RewriteExt: opts.RewriteExt,
-			SkipSame:   opts.SkipSame,
-			PartSize:   viper.GetInt(consts.FlagPartSize),
-			Threads:    viper.GetInt(consts.FlagThreads),
-			Iter:       iter,
-			Takeout:    opts.Takeout,
-		}
-		limit := viper.GetInt(consts.FlagLimit)
+	color.Green("All files will be downloaded to '%s' dir", opts.Dir)
 
-		logger.From(ctx).Info("Start download",
-			zap.String("dir", options.Dir),
-			zap.Bool("rewrite_ext", options.RewriteExt),
-			zap.Bool("skip_same", options.SkipSame),
-			zap.Int("part_size", options.PartSize),
-			zap.Int("threads", options.Threads),
-			zap.Int("limit", limit))
+	go dlProgress.Render()
+	defer prog.Wait(ctx, dlProgress)
 
-		return downloader.New(options).Download(ctx, limit)
-	})
+	return downloader.New(options).Download(ctx, limit)
 }
 
-func collectDialogs(ctx context.Context, pool dcpool.Pool, kvd kv.KV, parsers []parser) ([][]*dliter.Dialog, error) {
-	var dialogs [][]*dliter.Dialog
+func collectDialogs(parsers []parser) ([][]*tmessage.Dialog, error) {
+	var dialogs [][]*tmessage.Dialog
 	for _, p := range parsers {
-		d, err := p.Parser(ctx, pool, kvd, p.Data)
+		d, err := tmessage.Parse(p.Parser)
 		if err != nil {
 			return nil, err
 		}
@@ -139,12 +136,12 @@ func collectDialogs(ctx context.Context, pool dcpool.Pool, kvd kv.KV, parsers []
 	return dialogs, nil
 }
 
-func resume(ctx context.Context, kvd kv.KV, iter *dliter.Iter, ask bool) error {
-	logger.From(ctx).Debug("Check resume key",
+func resume(ctx context.Context, kvd storage.Storage, iter *iter, ask bool) error {
+	logctx.From(ctx).Debug("Check resume key",
 		zap.String("fingerprint", iter.Fingerprint()))
 
-	b, err := kvd.Get(key.Resume(iter.Fingerprint()))
-	if err != nil && !errors.Is(err, kv.ErrNotFound) {
+	b, err := kvd.Get(ctx, key.Resume(iter.Fingerprint()))
+	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return err
 	}
 	if len(b) == 0 { // no progress
@@ -162,7 +159,7 @@ func resume(ctx context.Context, kvd kv.KV, iter *dliter.Iter, ask bool) error {
 	}
 
 	confirm := false
-	resumeStr := fmt.Sprintf("Found unfinished download, continue from '%d/%d'", len(finished), iter.Total(ctx))
+	resumeStr := fmt.Sprintf("Found unfinished download, continue from '%d/%d'", len(finished), iter.Total())
 	if ask {
 		if err = survey.AskOne(&survey.Confirm{
 			Message: color.YellowString(resumeStr + "?"),
@@ -174,26 +171,26 @@ func resume(ctx context.Context, kvd kv.KV, iter *dliter.Iter, ask bool) error {
 		confirm = true
 	}
 
-	logger.From(ctx).Debug("Resume download",
+	logctx.From(ctx).Debug("Resume download",
 		zap.Int("finished", len(finished)))
 
 	if !confirm {
 		// clear resume key
-		return kvd.Delete(key.Resume(iter.Fingerprint()))
+		return kvd.Delete(ctx, key.Resume(iter.Fingerprint()))
 	}
 
 	iter.SetFinished(finished)
 	return nil
 }
 
-func saveProgress(ctx context.Context, kvd kv.KV, it *dliter.Iter) error {
+func saveProgress(ctx context.Context, kvd storage.Storage, it *iter) error {
 	finished := it.Finished()
-	logger.From(ctx).Debug("Save progress",
+	logctx.From(ctx).Debug("Save progress",
 		zap.Int("finished", len(finished)))
 
 	b, err := json.Marshal(finished)
 	if err != nil {
 		return err
 	}
-	return kvd.Set(key.Resume(it.Fingerprint()), b)
+	return kvd.Set(ctx, key.Resume(it.Fingerprint()), b)
 }

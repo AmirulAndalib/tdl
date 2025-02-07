@@ -11,16 +11,7 @@ weight: 30
 Get message links from "Copy Link" button in official clients.
 {{< /hint >}}
 
-{{< details title="Message Link Examples" open=false >}}
-
-- `https://t.me/telegram/193`
-- `https://t.me/c/1697797156/151`
-- `https://t.me/iFreeKnow/45662/55005`
-- `https://t.me/c/1492447836/251015/251021`
-- `https://t.me/opencfdchannel/4434?comment=360409`
-- `https://t.me/myhostloc/1485524?thread=1485523`
-- `...` (File a new issue if you find a new link format)
-  {{< /details >}}
+{{< include "snippets/link.md" >}}
 
 {{< command >}}
 tdl dl -u https://t.me/tdl/1 -u https://t.me/tdl/2
@@ -69,10 +60,10 @@ tdl dl -u https://t.me/tdl/1 -d /path/to/dir
 
 ## Custom Parameters:
 
-Download with 8 threads per task, 512KiB(MAX) part size, 4 concurrent tasks:
+Download with 8 threads per task, 4 concurrent tasks:
 
 {{< command >}}
-tdl dl -u https://t.me/tdl/1 -t 8 -s 524288 -l 4
+tdl dl -u https://t.me/tdl/1 -t 8 -l 4
 {{< /command >}}
 
 ## Descending Order:
@@ -97,6 +88,14 @@ Side effect: like `.apk` file, it will be renamed to `.zip`.
 
 {{< command >}}
 tdl dl -u https://t.me/tdl/1 --rewrite-ext
+{{< /command >}}
+
+## Album/Grouped Detection
+
+Automatically detect if the message is an album/grouped message and download all of them.
+
+{{< command >}}
+tdl dl -u https://t.me/tdl/1 --group
 {{< /command >}}
 
 ## Auto Skip

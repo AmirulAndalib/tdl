@@ -1,10 +1,10 @@
 package consts
 
 var (
-	HomeDir        string
-	DataDir        string
-	KVPath         string
-	LogPath        string
-	DocsPath       = "docs"
-	UploadThumbExt = ".thumb"
+	HomeDir            string
+	DataDir            string
+	LogPath            string
+	ExtensionsPath     string
+	ExtensionsDataPath string
+	UploadThumbExt     = ".thumb"
 )
